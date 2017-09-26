@@ -845,19 +845,20 @@ private:
     auto input = ensureDouble(value);
     // We can handle this in one of two ways: clamping, which is fast, or JS, which
     // is precisely like JS but in order to do that we do a slow ffi
+    auto name = signed_ ? F64_TO_INT : F64_TO_UINT;
     if (trapMode == TrapMode::JS) {
       // WebAssembly traps on float-to-int overflows, but asm.js wouldn't, so we must emulate that
       CallImport *ret = allocator.alloc<CallImport>();
-      ret->target = F64_TO_INT;
+      ret->target = F64_TO_INT; // note: asm.js has just signed f64-to-int, no unsigned
       ret->operands.push_back(input);
       ret->type = i32;
       static bool addedImport = false;
       if (!addedImport) {
         addedImport = true;
         auto import = new Import; // f64-to-int = asm2wasm.f64-to-int;
-        import->name = F64_TO_INT;
+        import->name = ret->target;
         import->module = ASM2WASM;
-        import->base = F64_TO_INT;
+        import->base = ret->target;
         import->functionType = ensureFunctionType("id", &wasm)->name;
         import->kind = ExternalKind::Function;
         wasm.addImport(import);
@@ -866,35 +867,51 @@ private:
     }
     assert(trapMode == TrapMode::Clamp);
     Call *ret = allocator.alloc<Call>();
-    ret->target = F64_TO_INT;
+    ret->target = name;
     ret->operands.push_back(input);
     ret->type = i32;
-    static bool added = false;
-    if (!added) {
-      added = true;
+    static bool addedSigned = false,
+                addedUnsigned = false;
+    if ((signed_ && !addedSigned) || (!signed_ && !addedUnsigned)) {
+      if (signed_) {
+        addedSigned = true;
+      } else {
+        addedUnsigned = true;
+      }
       auto func = new Function;
       func->name = ret->target;
       func->params.push_back(f64);
       func->result = i32;
-      func->body = builder.makeUnary(TruncSFloat64ToInt32,
+      func->body = builder.makeUnary(
+        signed_ ? TruncSFloat64ToInt32 : TruncUFloat64ToInt32,
         builder.makeGetLocal(0, f64)
       );
       // too small XXX this is different than asm.js, which does frem. here we clamp, which is much simpler/faster, and similar to native builds
+      Literal min, minMinusOne, maxPlusOne;
+      if (signed_) {
+        min = Literal(int32_t(std::numeric_limits<int32_t>::min()));
+        minMinusOne = Literal(double(std::numeric_limits<int32_t>::min()) - 1);
+        maxPlusOne = Literal(double(std::numeric_limits<int32_t>::max()) + 1);
+      } else {
+        min = Literal(uint32_t(std::numeric_limits<uint32_t>::min()));
+        minMinusOne = Literal(double(std::numeric_limits<uint32_t>::min()) - 1);
+        maxPlusOne = Literal(double(std::numeric_limits<uint32_t>::max()) + 1);
+      }
       func->body = builder.makeIf(
         builder.makeBinary(LeFloat64,
           builder.makeGetLocal(0, f64),
-          builder.makeConst(Literal(double(std::numeric_limits<int32_t>::min()) - 1))
+          builder.makeConst(minMinusOne)
         ),
-        builder.makeConst(Literal(int32_t(std::numeric_limits<int32_t>::min()))),
+        builder.makeConst(min),
         func->body
       );
       // too big XXX see above
       func->body = builder.makeIf(
         builder.makeBinary(GeFloat64,
           builder.makeGetLocal(0, f64),
-          builder.makeConst(Literal(double(std::numeric_limits<int32_t>::max()) + 1))
+          builder.makeConst(maxPlusOne)
         ),
-        builder.makeConst(Literal(int32_t(std::numeric_limits<int32_t>::min()))), // NB: min here as well. anything out of range => to the min
+        builder.makeConst(min), // NB: min here as well. anything out of range => to the min
         func->body
       );
       // nan
@@ -903,7 +920,7 @@ private:
           builder.makeGetLocal(0, f64),
           builder.makeGetLocal(0, f64)
         ),
-        builder.makeConst(Literal(int32_t(std::numeric_limits<int32_t>::min()))), // NB: min here as well. anything invalid => to the min
+        builder.makeConst(min), // NB: min here as well. anything invalid => to the min
         func->body
       );
       wasm.addFunction(func);
@@ -927,37 +944,54 @@ private:
     // WebAssembly traps on float-to-int overflows, but asm.js wouldn't, so we must do something
     // First, normalize input to f64
     auto input = ensureDouble(value);
+    auto name = signed_ ? F64_TO_INT64 : F64_TO_UINT64;
     // There is no "JS" way to handle this, as no i64s in JS, so always clamp if we don't allow traps
     Call *ret = allocator.alloc<Call>();
-    ret->target = F64_TO_INT64;
+    ret->target = name;
     ret->operands.push_back(input);
     ret->type = i64;
-    static bool added = false;
-    if (!added) {
-      added = true;
+    static bool addedSigned = false,
+                addedUnsigned = false;
+    if ((signed_ && !addedSigned) || (!signed_ && !addedUnsigned)) {
+      if (signed_) {
+        addedSigned = true;
+      } else {
+        addedUnsigned = true;
+      }
       auto func = new Function;
       func->name = ret->target;
       func->params.push_back(f64);
       func->result = i64;
-      func->body = builder.makeUnary(TruncSFloat64ToInt64,
+      func->body = builder.makeUnary(
+        signed_ ? TruncSFloat64ToInt64 : TruncUFloat64ToInt64,
         builder.makeGetLocal(0, f64)
       );
+      Literal min, minMinusOne, maxPlusOne;
+      if (signed_) {
+        min = Literal(int64_t(std::numeric_limits<int64_t>::min()));
+        minMinusOne = Literal(double(std::numeric_limits<int64_t>::min()) - 1);
+        maxPlusOne = Literal(double(std::numeric_limits<int64_t>::max()) + 1);
+      } else {
+        min = Literal(uint64_t(std::numeric_limits<uint64_t>::min()));
+        minMinusOne = Literal(double(std::numeric_limits<uint64_t>::min()) - 1);
+        maxPlusOne = Literal(double(std::numeric_limits<uint64_t>::max()) + 1);
+      }
       // too small
       func->body = builder.makeIf(
         builder.makeBinary(LeFloat64,
           builder.makeGetLocal(0, f64),
-          builder.makeConst(Literal(double(std::numeric_limits<int64_t>::min()) - 1))
+          builder.makeConst(minMinusOne)
         ),
-        builder.makeConst(Literal(int64_t(std::numeric_limits<int64_t>::min()))),
+        builder.makeConst(min),
         func->body
       );
       // too big
       func->body = builder.makeIf(
         builder.makeBinary(GeFloat64,
           builder.makeGetLocal(0, f64),
-          builder.makeConst(Literal(double(std::numeric_limits<int64_t>::max()) + 1))
+          builder.makeConst(maxPlusOne)
         ),
-        builder.makeConst(Literal(int64_t(std::numeric_limits<int64_t>::min()))), // NB: min here as well. anything out of range => to the min
+        builder.makeConst(min), // NB: min here as well. anything out of range => to the min
         func->body
       );
       // nan
@@ -966,7 +1000,7 @@ private:
           builder.makeGetLocal(0, f64),
           builder.makeGetLocal(0, f64)
         ),
-        builder.makeConst(Literal(int64_t(std::numeric_limits<int64_t>::min()))), // NB: min here as well. anything invalid => to the min
+        builder.makeConst(min), // NB: min here as well. anything invalid => to the min
         func->body
       );
       wasm.addFunction(func);
